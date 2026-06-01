@@ -1,36 +1,54 @@
-# Discord chatbot for solving fast food surveys.
-## How it works
-### Whataburger
-Send QR or link from QR on recept. solver solves the survey and sends the cupon for free burger with a purchase of fries and drink to the email given.
-### Dairy Queen
-Send QR or link from QR on recept. solver returns a confirmation image continuing free dilly bar cupon.
-### Canes
-Use CLI do deliver code to bot. solver enters user in the Free canes for a year drawing. 
+# Survey Bot
 
-## External dependencies
-Create a .env file and fill it with these values:
-Ensure you are using the bot token from the "Bot" tab and not the "Client Secret" from the "OAuth2" tab.
+API that automates fast food customer survey forms to claim rewards.
 
-requirements for each solver:
+## Supported surveys
 
-| Solver      | requirement                        |
-|-------------|------------------------------------|
-| All         | - Chome or chromium<br/>- Discord  |
-| Whataburger | [Capsolver api key](capsolver.com) |
-| Dairy Queen | none                               |
-| Canes       | idk might be broke                 |
+| Survey | URL pattern | Reward |
+|---|---|---|
+| Whataburger | `whataburger.com` | Coupon emailed to provided address |
+| Dairy Queen | `mydqexperience.com` | Verification code returned in response |
+While there are chunks of legacy code for different businesses that may work,
+they've been disabled until I can find the time to test them.
+## Prerequisites
+
+- Go 1.21+
+- Chrome or Chromium installed
+- capsolverapi key (needed for Whataburger)
+
+## Setup
+Create a `.env` file (or export the vars directly):
+
 ```
-BotToken=
-DefaultEmail=
-CapSolverKey=
+CapSolverKey=   # required for Whataburger only
 ```
-Run with `go run main.go`
 
-For QR reader capabilities set up the venv and install python requirements:
-```aiignore
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+## Start API
+```sh
+go run main.go
 ```
-Docker build command: `docker build -t ladariousx/survey-bot:v2.01 .;` Unfortunetly the being image is super bloated beucause of base
-image and opencv. BEWARE the .env is copied to the image and therefor container.
+
+## API
+**Example Whataburger request using URL from QR code on receipt**
+```sh
+curl -X POST http://localhost:3000/api/survey-bot \
+  -H "Content-Type: application/json" \
+  -d '{"url":"URLToSurveyFromQr", "email":"you@example.com"}'
+```
+
+
+### `POST /api/survey-bot`
+
+**Request**
+```json
+{ "url":   "<survey url>",
+  "email": "<your email>" }
+```
+
+**Response (200)**
+```json
+{ "message": "Survey completed successfully.", 
+  "code":    "<verification code>" }
+```
+`"code"` is only present for DQ surveys.
+

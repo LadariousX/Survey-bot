@@ -12,6 +12,7 @@ import (
 )
 
 func processWhataburger(url, email string) error {
+	fmt.Println("Processing Whataburger survey...")
 	capSolver := capsolver.CapSolver{ApiKey: os.Getenv("CapSolverKey")}
 
 	cleanScreenshotErr := os.RemoveAll("screenshots")

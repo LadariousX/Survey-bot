@@ -1,15 +1,12 @@
-/*
-IDEAS:
-  - use chromium or go container (lighten)
-*/
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
-	"os/signal"
 	"sort"
 	"strings"
 	"time"
@@ -19,16 +16,22 @@ import (
 	"github.com/joho/godotenv"
 )
 
-var modes = [4]string{"Help", "Cane", "What", "DQ"} // code options for initial mode filter
-var (
-	DefaultEmail string
-	BotToken     string
-	CapSolverKey string
-	OpenAIKey    string
-)
-var reconnectFailures = 0
+// TODO: add see more button after interal server errror in html
 
-// findChromePath detects Chrome/Chromium path for both local and container environments
+func main() {
+	godotenv.Load()
+	addr := "0.0.0.0:3000"
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/survey-bot", handleSurvey)
+
+	log.Printf("Survey-bot listening on %q", addr)
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		log.Fatalf("server: %v", err)
+	}
+}
+
+// findChromePath detects Chrome / Chromium path for both local and container environments
 func findChromePath() string {
 	// Container path (Chromium)
 	if _, err := os.Stat("/usr/bin/chromium"); err == nil {
@@ -46,249 +49,79 @@ func findChromePath() string {
 	return ""
 }
 
-// runSolverSafe runs a solver function in a goroutine with panic recovery
-func runSolverSafe(solverName string, solverFunc func() error) error {
-	errChan := make(chan error, 1)
-
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("Recovered from panic in %s solver: %v", solverName, r)
-				errChan <- fmt.Errorf("%s solver panicked: %v", solverName, r)
-			}
-		}()
-		err := solverFunc()
-		errChan <- err
+func runSolver(solverName string, fn func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Recovered from panic in %s solver: %v", solverName, r)
+			err = fmt.Errorf("%s solver panicked: %v", solverName, r)
+		}
 	}()
-	return <-errChan
+	return fn()
 }
 
-func main() {
-	err := godotenv.Load() // get constants and defaults
-	if err != nil {
-		log.Fatalf("error loading .env file: %s", err)
-	}
-	BotToken = os.Getenv("BotToken")
-	DefaultEmail = os.Getenv("DefaultEmail")
-
-	bot, newSessionErr := discordgo.New("Bot " + BotToken)
-	if newSessionErr != nil {
-		reconnectFailures++
-		if reconnectFailures > 2 {
-			log.Fatalf(" reconnection failure, attempt surpassed, exiting")
-		}
-		log.Printf("Error creating Discord session: %v", newSessionErr)
-	}
-
-	bot.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
-		var processErr []error
-		// Ignore messages from the bot itself
-		if m.Author.ID == s.State.User.ID {
-			return
-		}
-		var sendConfImg = true
-
-		//=======================
-		// qr reader and local ocr
-		//=======================
-		if len(m.Attachments) > 0 {
-			fmt.Println("image received: ", m.Attachments[0].URL)
-			_, msgErr5 := s.ChannelMessageSend(m.ChannelID, "Received image...")
-			if msgErr5 != nil {
-				panic(fmt.Sprintf("Error (msgErr5) sending Discord message: %v", msgErr5))
-			}
-
-			imgPath, imageErr := fetchImage(m.Attachments[0].URL)
-			if imageErr != nil { // break if the image doesn't load
-				processErr = append(processErr, imageErr)
-			}
-
-			QRErr, url := ExtractQR(imgPath) // will not support guest
-			if QRErr != nil {
-				processErr = append(processErr, fmt.Errorf("%w", QRErr))
-			}
-
-			if len(url) > 0 { // perhaps unnecessary check
-				if strings.Contains(url, "mydqexperience") {
-					DQErr := runSolverSafe("DQ", func() error {
-						return processDQ(url)
-					})
-					if DQErr != nil {
-						processErr = append(processErr, DQErr)
-					}
-
-				} else if strings.Contains(url, "whataburger") {
-					whataburgerErr := runSolverSafe("Whataburger", func() error {
-						return processWhataburger(url, DefaultEmail)
-					})
-					if whataburgerErr != nil {
-						processErr = append(processErr, whataburgerErr)
-					}
-
-				} else {
-					processErr = append(processErr, fmt.Errorf("error sorting the QR URL to solvers"))
-				}
-			}
-
-			//=======================
-			// if regular text message
-			//=======================
-		} else {
-
-			codeValidityErr, code := isValidCode(m.Content)
-			if codeValidityErr != nil { // invalid code
-				sendConfImg = false
-				_, msgErr0 := s.ChannelMessageSend(m.ChannelID, "Code format error, use the \"Help\" command for further instruction.")
-				if msgErr0 != nil {
-					panic(fmt.Sprintf("Error (msgErr0) sending Discord message: %v", msgErr0))
-				}
-
-			} else { // case of valid code
-				if code[0] != "Help" { // if help cmd then skip RX code message
-					_, msgErr1 := s.ChannelMessageSend(m.ChannelID, "Received code, processing...")
-					if msgErr1 != nil {
-						panic(fmt.Sprintf("Error (msgErr1) sending Discord message: %v", msgErr1))
-					}
-				}
-
-				// choose and handoff to survey solver
-				switch code[0] {
-				case "Help":
-					sendConfImg = false
-					processErr = nil
-					out := ""
-					for i := range modes {
-						out = out + modes[i] + ", "
-					}
-					_, msgErr2 := s.ChannelMessageSend(m.ChannelID, "send images of QR codes or use the CLI messenger. "+
-						"Command format:\n\"<Mode> <Code/URL> <Email>\""+
-						"\nAvailable modes: "+out+"\nGuest Email function is not supported by all modes or by QR.")
-					if msgErr2 != nil {
-						panic(fmt.Sprintf("Error (msgErr2) sending Discord message: %v", msgErr2))
-					}
-
-				case "Cane":
-					CaneErr := runSolverSafe("Canes", func() error {
-						return processCanes(code[1], code[2]) // code: [(mode) code email]
-					})
-					if CaneErr != nil {
-						processErr = append(processErr, CaneErr)
-					}
-				case "What":
-					WhatErr := runSolverSafe("Whataburger", func() error {
-						return processWhataburger(code[1], code[2])
-					})
-					if WhatErr != nil {
-						processErr = append(processErr, WhatErr)
-					} else {
-
-					}
-
-				case "DQ":
-					DQErr := runSolverSafe("DQ", func() error {
-						return processDQ(code[1])
-					})
-					if DQErr != nil {
-						processErr = append(processErr, DQErr)
-					}
-				}
-			}
-		}
-
-		// handel errors then clear
-
-		if len(processErr) > 0 {
-			log.Printf("Error processing survey: %v", processErr)
-			_, msgErr3 := s.ChannelMessageSend(m.ChannelID, "There was an error completing the survey:\n--> "+processErr[len(processErr)-1].Error())
-			if msgErr3 != nil {
-				panic(fmt.Sprintf("Error (msgErr3) sending Discord message: %v", msgErr3))
-			}
-			sendConfImg = false
-
-		} else {
-			if sendConfImg { //respond with result, picture if no conf img send failure msg
-				confImgErr := confImg(s, m.ChannelID)
-				if confImgErr != nil {
-					_, msgErr4 := s.ChannelMessageSend(m.ChannelID, "No image available, there was likely an undetected automation error")
-					if msgErr4 != nil {
-						panic(fmt.Sprintf("Error (msgErr4) sending Discord message: %v", msgErr4))
-					}
-				}
-			}
-		}
-	})
-
-	// Open a websocket to Discord
-	newSessionErr = bot.Open()
-	if newSessionErr != nil {
-		log.Fatalf("Error opening connection to Discord: %v", newSessionErr)
-	}
-
-	fmt.Println("Bot has started")
-	// Wait for a termination signal to exit
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt)
-	<-stop
-
-	botCloseErr := bot.Close()
-	if botCloseErr != nil {
-		log.Fatalf("Error closing Discord session, terminating program: %v", botCloseErr)
-	}
+type surveyRequest struct {
+	URL   string `json:"url"`
+	Email string `json:"email"`
 }
 
-func isValidCode(message string) (error, []string) {
-	out := make([]string, 3)
-	cutMsg := strings.Fields(message) // [mode code email]
-	fmt.Println(cutMsg)
+type surveyResponse struct {
+	Message string `json:"message"`
+	Code    string `json:"code,omitempty"`
+}
 
-	// Handle raw links first
-	if len(cutMsg) > 0 {
-		if strings.Contains(cutMsg[0], "mydqexperience") {
-			out = []string{"DQ", cutMsg[0], ""}
-			return nil, out
-		}
-		if strings.Contains(cutMsg[0], "whataburger") {
-			email := DefaultEmail
-			if len(cutMsg) >= 2 {
-				email = cutMsg[1]
-			}
-			out = []string{"What", cutMsg[0], email}
-			return nil, out
-		}
+func handleSurvey(w http.ResponseWriter, r *http.Request) {
+	var req surveyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	println(req.URL, req.Email)
+	if req.URL == "" || req.Email == "" {
+		http.Error(w, "url and email are required", http.StatusBadRequest)
+		return
 	}
 
-	// Continue with mode formatting
-	var modeValid = false
+	var solveErr []error
+	resp := surveyResponse{Message: "Survey completed successfully."}
 
-	for i := range modes { // check that mode exist
-		if cutMsg[0] == modes[i] {
-			modeValid = true
+	switch {
+	case strings.Contains(req.URL, "feedback.whataburger.com"):
+		WhatErr := runSolver("Whataburger", func() error {
+			return processWhataburger(req.URL, req.Email)
+		})
+		if WhatErr != nil {
+			solveErr = append(solveErr, WhatErr)
 		}
-	}
+		resp.Message = "Survey completed successfully. Check promotions in your email for coupon."
 
-	if !modeValid { // Error for invalid modes
-		out = []string{"", "", ""}
-		return fmt.Errorf("mode does not exist"), out
-	}
-
-	if cutMsg[0] == "Help" {
-		out = []string{"Help", "", ""} // Help w/o code
-		return nil, out
-	}
-
-	if len(message) > 6 { // EX <Cane 123> 4char+ space+ code
-		if len(cutMsg) == 2 {
-			out = []string{cutMsg[0], cutMsg[1], DefaultEmail}
-			return nil, out
+	case strings.Contains(req.URL, "mydqexperience"):
+		DQErr := runSolver("DQ", func() error {
+			var err error
+			resp.Code, err = processDQ(req.URL)
+			return err
+		})
+		if DQErr != nil {
+			solveErr = append(solveErr, DQErr)
 		}
-		if len(cutMsg) == 3 {
-			out = []string{cutMsg[0], cutMsg[1], cutMsg[2]}
-			return nil, out
-		}
-	}
-	out = []string{"", "", ""}
-	return fmt.Errorf("unknown code / validity error"), out
 
+	default:
+		http.Error(w, "unrecognized survey URL", http.StatusBadRequest)
+		return
+	}
+
+	if solveErr != nil {
+		var msgs []string
+		for _, e := range solveErr {
+			msgs = append(msgs, e.Error())
+		}
+		http.Error(w, strings.Join(msgs, "\n"), http.StatusInternalServerError)
+		return
+	}
+
+	println(resp.Message)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+	println("response sent")
 }
 
 func confImg(session *discordgo.Session, channelID string) error {
@@ -332,7 +165,7 @@ func takeScreenshot(label string) chromedp.ActionFunc {
 		if err := os.MkdirAll("screenshots", 0755); err != nil {
 			return fmt.Errorf("failed to create folder %s: %w", "folder", err)
 		}
-		filename := fmt.Sprintf("screenshots/%s.png", label)
+		filename := fmt.Sprintf("screenshots/%d_%s.png", os.Getpid(), label)
 		if err := os.WriteFile(filename, screenshot, 0644); err != nil {
 			return fmt.Errorf("failed to save screenshot to screenshots/%s: %w", filename, err)
 		}

@@ -3,11 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/chromedp/chromedp"
 	"math/rand"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/chromedp/chromedp"
 )
 
 func processCanes(rawSurveyCode, email string) error {

@@ -10,7 +10,7 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
-func processDQ(url string) error {
+func processDQ(url string) (string, error) {
 	cleanScreenshotErr := os.RemoveAll("screenshots")
 	if cleanScreenshotErr != nil && !os.IsNotExist(cleanScreenshotErr) {
 		fmt.Println(cleanScreenshotErr)
@@ -35,7 +35,7 @@ func processDQ(url string) error {
 	run1Err := chromedp.Run(ctx, chromedp.Navigate(url),
 		chromedp.Sleep(2*time.Second), takeScreenshot("0 init"))
 	if run1Err != nil {
-		return fmt.Errorf("chromedp run 1 err: %w", run1Err)
+		return "", fmt.Errorf("chromedp run 1 err: %w", run1Err)
 	}
 	jsResult := false
 
@@ -63,20 +63,28 @@ func processDQ(url string) error {
 
 		if run2Err != nil {
 			fmt.Println(run2Err)
-			return fmt.Errorf("chromedp run 2 err: %w", run2Err)
+			return "", fmt.Errorf("chromedp run 2 err, the survey may have expired: %w", run2Err)
 		}
 
 		if jsResult {
 			screenshotRunErr := chromedp.Run(ctx, takeScreenshot("99 confirmation"))
 			if screenshotRunErr != nil {
-				return fmt.Errorf("chromedp screenshot run err: %w", screenshotRunErr)
+				return "", fmt.Errorf("chromedp screenshot run err: %w", screenshotRunErr)
 			}
 			break
 		}
 
 		if i == 39 {
-			return fmt.Errorf("DQ bruteforce timed out")
+			return "", fmt.Errorf("DQ bruteforce timed out")
 		}
 	}
-	return nil
+	var res string
+	run3Err := chromedp.Run(ctx, chromedp.Text(`.ValCode`, &res, chromedp.ByQuery))
+	if run3Err != nil {
+		return "", fmt.Errorf("chromedp run 3 err: %w", run3Err)
+	}
+	if len(res) < 17 {
+		return "", fmt.Errorf("verification code string unexpected length: %s", res)
+	}
+	return res[17:], nil
 }
