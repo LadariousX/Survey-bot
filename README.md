@@ -23,6 +23,11 @@ Create a `.env` file (or export the vars directly):
 CapSolverKey=   # required for Whataburger only
 ```
 
+Download Go module dependencies:
+```sh
+go mod download
+```
+
 ## Start API
 ```sh
 go run main.go
